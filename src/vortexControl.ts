@@ -1074,8 +1074,19 @@ export interface ProfileSummary {
   lastActivated: number;
 }
 
-function summarizeProfile(profile: IProfile, activeProfileId: string | undefined): ProfileSummary {
-  const modStates = Object.values(profile.modState ?? {});
+// Counts only mods still installed for the profile's game. Found live: modState keeps
+// entries for mods that were uninstalled since (6 on a real Skyrim SE profile: 131 counted,
+// 125 installed) until Vortex drops them the next time the profile is activated — so a
+// clone of an older profile showed different counts than the same profile after a switch.
+function summarizeProfile(
+  profile: IProfile,
+  activeProfileId: string | undefined,
+  st: types.IState,
+): ProfileSummary {
+  const installed = st.persistent?.mods?.[profile.gameId] ?? {};
+  const modStates = Object.entries(profile.modState ?? {})
+    .filter(([modId]) => installed[modId] !== undefined)
+    .map(([, modState]) => modState);
   return {
     id: profile.id,
     name: profile.name,
@@ -1100,7 +1111,7 @@ export function listProfiles(api: IExtensionApi, gameId?: string): ProfileSummar
   return all
     .filter((p) => p.pendingRemove !== true)
     .filter((p) => gameId === undefined || p.gameId === gameId)
-    .map((p) => summarizeProfile(p, activeProfileId))
+    .map((p) => summarizeProfile(p, activeProfileId, st))
     .toSorted((a, b) => b.lastActivated - a.lastActivated);
 }
 
@@ -1137,7 +1148,7 @@ export async function cloneProfile(
   await fs.copyAsync(profilePath(source), profilePath(newProfile));
   store(api).dispatch(actions.setProfile(newProfile));
 
-  return summarizeProfile(newProfile, selectors.activeProfileId(st));
+  return summarizeProfile(newProfile, selectors.activeProfileId(st), st);
 }
 
 export interface ListModsOptions {

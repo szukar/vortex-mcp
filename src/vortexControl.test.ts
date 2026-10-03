@@ -327,6 +327,8 @@ describe("vortexControl: profiles", () => {
         modState: {
           modA: { enabled: true, enabledTime: 0 },
           modB: { enabled: false, enabledTime: 0 },
+          // Left over from a mod uninstalled since — must not be counted.
+          uninstalledMod: { enabled: true, enabledTime: 0 },
         },
         lastActivated: 200,
       },
@@ -340,8 +342,12 @@ describe("vortexControl: profiles", () => {
       },
     });
     vi.mocked(selectors.activeProfileId).mockReturnValue("recent");
+    const api = fakeApi();
+    (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({
+      persistent: { mods: { skyrimse: { modA: { id: "modA" }, modB: { id: "modB" } } } },
+    });
 
-    const result = listProfiles(fakeApi());
+    const result = listProfiles(api);
 
     expect(result).toEqual([
       {
