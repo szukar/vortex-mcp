@@ -350,7 +350,8 @@ const ACTION_HINTS = new Map<string, string>([
       "list at all, unreachable any other way through this project. Only applies to " +
       "games using the gamebryo/LOOT plugin system (list_load_order works or throws the " +
       "same way this does or doesn't apply). Re-check list_load_order afterward — this " +
-      "doesn't deploy or update plugins.txt itself.",
+      "doesn't deploy or update plugins.txt itself. Prefer the set_plugins_enabled tool: " +
+      "this reducer creates a new load-order entry for an unknown plugin name.",
   ],
   ["addMod", "gameId: string, mod: IMod"],
   ["addMods", "gameId: string, mods: IMod[]"],
@@ -1530,6 +1531,93 @@ export async function setModsEnabled(
     changed: toChange.filter((id) => isModEnabled(after, id) === enabled),
     unchanged,
     failed: toChange.filter((id) => isModEnabled(after, id) !== enabled),
+  };
+}
+
+export interface SetPluginsEnabledResult {
+  enabled: boolean;
+  /** Plugins this call actually switched to the requested state (lowercase, as Vortex keys them). */
+  changed: string[];
+  /** Plugins already in the requested state — including native plugins asked to be enabled. */
+  unchanged: string[];
+  /** Plugins that should have changed but are still in the old state afterwards. */
+  failed: string[];
+}
+
+function isPluginEnabled(api: IExtensionApi, plugin: string): boolean {
+  const entry = listLoadOrder(api).find((e) => e.plugin.toLowerCase() === plugin);
+  return entry?.enabled ?? false;
+}
+
+/**
+ * Enables/disables plugins (.esp/.esm/.esl) in the active profile's load order by
+ * dispatching gamebryo-plugin-management's own SET_PLUGIN_ENABLED action — the same one
+ * its Plugins page dispatches. That action creator isn't exported through
+ * @nexusmods/vortex-api (see ACTION_HINTS' "type:SET_PLUGIN_ENABLED"), so the only other
+ * way was one raw vortex_dispatch per plugin, with no checks:
+ * - Its reducer doesn't check names: an unknown one gets a NEW load-order entry
+ *   (loadOrder -1), the plugin-level twin of the junk modState entry setModsEnabled used
+ *   to write. Every name is validated against session.plugins.pluginList first,
+ *   all-or-nothing.
+ * - The Plugins page never toggles native plugins (the engine loads them regardless) and
+ *   un/ghosts ".ghost" files (a rename) instead of toggling them. Disabling a native
+ *   plugin, or touching a ghosted one, is refused rather than silently doing nothing.
+ * Like the Plugins page, this only changes Vortex's load-order state; plugins.txt is
+ * written by gamebryo-plugin-management on its own, and nothing is deployed.
+ */
+export function setPluginsEnabled(
+  api: IExtensionApi,
+  pluginNames: string[],
+  enabled: boolean,
+  expectedContext?: ExpectedContext,
+): SetPluginsEnabledResult {
+  assertExpectedContext(api, expectedContext);
+  const pluginList = (queryStatePath(api, ["session", "plugins", "pluginList"]) ?? {}) as Record<
+    string,
+    { isNative?: boolean; filePath?: string } | undefined
+  >;
+  if (Object.keys(pluginList).length === 0) {
+    throw new Error(
+      "No plugin list available (session.plugins.pluginList is empty) — the active game " +
+        "doesn't use the gamebryo/LOOT plugin system, or Vortex hasn't read its plugins yet.",
+    );
+  }
+
+  const names = [...new Set(pluginNames.map((name) => name.toLowerCase()))];
+  const unknown = names.filter((name) => pluginList[name] === undefined);
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown plugin(s): ${unknown.join(", ")} — nothing was changed. Use list_load_order ` +
+        "for the plugin names of the active profile.",
+    );
+  }
+  const native = names.filter((name) => pluginList[name]?.isNative === true);
+  if (!enabled && native.length > 0) {
+    throw new Error(
+      `Can't disable native plugin(s): ${native.join(", ")} — the game loads them on its ` +
+        "own. Nothing was changed.",
+    );
+  }
+  const ghosted = names.filter((name) =>
+    pluginList[name]?.filePath?.toLowerCase().endsWith(".ghost"),
+  );
+  if (ghosted.length > 0) {
+    throw new Error(
+      `Ghosted plugin(s): ${ghosted.join(", ")} — Vortex un/ghosts these by renaming the ` +
+        "file, which this tool doesn't do; use Vortex's Plugins page. Nothing was changed.",
+    );
+  }
+
+  const unchanged = names.filter((name) => isPluginEnabled(api, name) === enabled);
+  const toChange = names.filter((name) => isPluginEnabled(api, name) !== enabled);
+  for (const pluginName of toChange) {
+    store(api).dispatch({ type: "SET_PLUGIN_ENABLED", payload: { pluginName, enabled } });
+  }
+  return {
+    enabled,
+    changed: toChange.filter((name) => isPluginEnabled(api, name) === enabled),
+    unchanged,
+    failed: toChange.filter((name) => isPluginEnabled(api, name) !== enabled),
   };
 }
 

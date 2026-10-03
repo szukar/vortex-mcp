@@ -1044,6 +1044,36 @@ function registerWriteTools(server: McpServer, api: IExtensionApi): void {
   );
 
   server.registerTool(
+    "set_plugins_enabled",
+    {
+      description:
+        "Enable or disable plugins (.esp/.esm/.esl) in the active profile's load order — " +
+        "the same toggle as Vortex's Plugins page, distinct from set_mods_enabled (a mod " +
+        "can ship several plugins). Does not deploy. Every name is checked first (use " +
+        "list_load_order for names): one unknown plugin, an attempt to disable a native " +
+        "plugin (the game loads those regardless), or a ghosted (.ghost) plugin fails the " +
+        "whole call with nothing changed. Returns what really happened, re-read " +
+        "afterwards: `changed`, `unchanged` (already in the requested state), and `failed`. " +
+        "Pass expectedActiveProfileId to guard against acting on a stale assumption about " +
+        "what's currently active.",
+      inputSchema: z.object({
+        pluginNames: z.array(z.string()).min(1).describe("Plugin file names, e.g. 'Foo.esp'"),
+        enabled: z.boolean(),
+        expectedActiveProfileId: expectedContextSchema.expectedActiveProfileId,
+      }),
+    },
+    async ({ pluginNames, enabled, expectedActiveProfileId }) => ({
+      content: [
+        jsonText(
+          control.setPluginsEnabled(api, pluginNames, enabled, {
+            activeProfileId: expectedActiveProfileId,
+          }),
+        ),
+      ],
+    }),
+  );
+
+  server.registerTool(
     "deploy_mods",
     {
       description:

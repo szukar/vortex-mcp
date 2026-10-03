@@ -102,6 +102,7 @@ import {
   restartVortex,
   scanExtensionActions,
   setModsEnabled,
+  setPluginsEnabled,
   switchProfile,
 } from "./vortexControl";
 
@@ -666,6 +667,113 @@ function fakeModOperationApi(
   } as never;
   return { api, emit, listeners, setPluginActivity };
 }
+
+describe("vortexControl: setPluginsEnabled", () => {
+  // dispatch applies SET_PLUGIN_ENABLED the way gamebryo-plugin-management's reducer does
+  // (unless `ignore`), so the re-read after the call sees the result.
+  function fakePluginApi(ignore = false) {
+    vi.mocked(selectors.activeProfileId).mockReturnValue("p1");
+    const loadOrder: Record<string, { loadOrder: number; enabled?: boolean }> = {
+      "skyrim.esm": { loadOrder: 0, enabled: false },
+      "a.esp": { loadOrder: 1, enabled: true },
+      "b.esp": { loadOrder: 2, enabled: false },
+      "ghost.esp": { loadOrder: 3, enabled: false },
+    };
+    const pluginList = {
+      "skyrim.esm": { isNative: true, filePath: "C:/game/Data/Skyrim.esm" },
+      "a.esp": { filePath: "C:/game/Data/A.esp" },
+      "b.esp": { filePath: "C:/game/Data/B.esp" },
+      "ghost.esp": { filePath: "C:/game/Data/Ghost.esp.ghost" },
+    };
+    const dispatch = vi.fn((action: unknown) => {
+      const { type, payload } = action as {
+        type: string;
+        payload: { pluginName: string; enabled: boolean };
+      };
+      if (!ignore && type === "SET_PLUGIN_ENABLED") {
+        loadOrder[payload.pluginName].enabled = payload.enabled;
+      }
+    });
+    const api = fakeApi({ dispatch });
+    (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({
+      loadOrder,
+      session: { plugins: { pluginList } },
+    });
+    return { api, dispatch };
+  }
+
+  it("rejects the whole call when any plugin name is unknown, without dispatching", () => {
+    // The reducer would create a new load-order entry for an unknown name.
+    const { api, dispatch } = fakePluginApi();
+
+    expect(() => setPluginsEnabled(api, ["A.esp", "Nope.esp"], false)).toThrow(
+      /Unknown plugin\(s\): nope\.esp — nothing was changed/,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("refuses to disable a native plugin, without dispatching", () => {
+    const { api, dispatch } = fakePluginApi();
+
+    expect(() => setPluginsEnabled(api, ["A.esp", "Skyrim.esm"], false)).toThrow(
+      /Can't disable native plugin\(s\): skyrim\.esm/,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("refuses ghosted plugins, without dispatching", () => {
+    const { api, dispatch } = fakePluginApi();
+
+    expect(() => setPluginsEnabled(api, ["Ghost.esp"], true)).toThrow(
+      /Ghosted plugin\(s\): ghost\.esp/,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches SET_PLUGIN_ENABLED per plugin to change and reports the re-read result", () => {
+    const { api, dispatch } = fakePluginApi();
+
+    const result = setPluginsEnabled(api, ["B.esp", "a.esp", "Skyrim.esm", "b.esp"], true);
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "SET_PLUGIN_ENABLED",
+      payload: { pluginName: "b.esp", enabled: true },
+    });
+    // The native plugin counts as enabled (see listLoadOrder) even though its stored flag is false.
+    expect(result).toEqual({
+      enabled: true,
+      changed: ["b.esp"],
+      unchanged: ["a.esp", "skyrim.esm"],
+      failed: [],
+    });
+  });
+
+  it("reports plugins whose state didn't change as failed", () => {
+    const { api } = fakePluginApi(true);
+
+    const result = setPluginsEnabled(api, ["A.esp"], false);
+
+    expect(result.changed).toEqual([]);
+    expect(result.failed).toEqual(["a.esp"]);
+  });
+
+  it("throws a clear error when the active game has no plugin list", () => {
+    const api = fakeApi();
+    (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({});
+
+    expect(() => setPluginsEnabled(api, ["A.esp"], true)).toThrow(/No plugin list available/);
+  });
+
+  it("rejects when expectedActiveProfileId no longer matches, without dispatching", () => {
+    const { api, dispatch } = fakePluginApi();
+
+    expect(() => setPluginsEnabled(api, ["B.esp"], true, { activeProfileId: "other" })).toThrow(
+      /Active profile changed/,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+});
 
 describe("vortexControl: deployMods", () => {
   afterEach(() => {
