@@ -270,6 +270,28 @@ function registerModInventoryTools(server: McpServer, api: IExtensionApi): void 
   );
 
   server.registerTool(
+    "diff_profiles",
+    {
+      description:
+        "Compare two profiles of the same game: installed mods whose enabled state differs, " +
+        "and plugins that are only in one, enabled differently, or in a different load " +
+        "order (`moved` is the fewest plugins whose relative order differs, not every " +
+        "shifted position). The read side of working with a test profile — clone, change, " +
+        "then see exactly what's different from the original. The active profile's plugins " +
+        "come from live state, an inactive one's from its saved plugins.txt/loadorder.txt " +
+        "(as of the last switch away); native plugins are left out. `plugins` is null for " +
+        "games without a plugin-based load order. profileB defaults to the active profile.",
+      inputSchema: z.object({
+        profileA: z.string().describe("Profile id (query list_profiles to find one)"),
+        profileB: z.string().optional().describe("Profile id; defaults to the active profile"),
+      }),
+    },
+    async ({ profileA, profileB }) => ({
+      content: [jsonText(await control.diffProfiles(api, profileA, profileB))],
+    }),
+  );
+
+  server.registerTool(
     "list_mods",
     {
       description:

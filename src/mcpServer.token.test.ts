@@ -42,6 +42,7 @@ vi.mock("./vortexControl", () => ({
   setModsEnabled: vi.fn(async () => undefined),
   launchGame: vi.fn(async () => undefined),
   setPluginsEnabled: vi.fn(() => ({ enabled: true, changed: [], unchanged: [], failed: [] })),
+  diffProfiles: vi.fn(async () => ({ a: {}, b: {}, mods: [], plugins: null })),
   deployMods: vi.fn(async () => ({ profileId: "p1", deployMs: 1, lootSort: "done" })),
   purgeMods: vi.fn(async () => ({ profileId: "p1", purgeMs: 1 })),
   restartVortex: vi.fn(),

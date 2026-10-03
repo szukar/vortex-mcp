@@ -1238,6 +1238,211 @@ export async function cloneProfile(
   return summarizeProfile(newProfile, selectors.activeProfileId(st), st);
 }
 
+export interface ProfileRef {
+  id: string;
+  name: string;
+}
+
+export interface ModStateDiff {
+  id: string;
+  name: string;
+  enabledInA: boolean;
+  enabledInB: boolean;
+}
+
+export interface PluginDiff {
+  /** Where each side's plugin state came from: live state (active profile) or its profile folder's plugins.txt/loadorder.txt. */
+  sourceA: "live" | "profile files";
+  sourceB: "live" | "profile files";
+  onlyInA: string[];
+  onlyInB: string[];
+  enabledDiffers: { plugin: string; enabledInA: boolean; enabledInB: boolean }[];
+  /**
+   * The fewest plugins whose relative order differs: everything else keeps the same order
+   * in both (longest common order). Raw positions alone would flag every plugin after a
+   * single insertion. Indexes are load order positions, natives included.
+   */
+  moved: { plugin: string; indexInA: number; indexInB: number }[];
+}
+
+export interface ProfileDiff {
+  a: ProfileRef;
+  b: ProfileRef;
+  /** Installed mods whose enabled state differs (a mod with no modState entry counts as disabled). */
+  mods: ModStateDiff[];
+  /** null when a side has no plugin-based load order or no saved plugin files. */
+  plugins: PluginDiff | null;
+}
+
+type PluginSide = {
+  states: Map<string, { enabled: boolean; index: number }>;
+  source: PluginDiff["sourceA"];
+};
+
+function fileLines(content: string): string[] {
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+/**
+ * A profile's non-native plugins with enabled state and load order position. The active
+ * profile's come from live state (listLoadOrder). Vortex keeps load order state only for
+ * the active profile, but writes every profile's plugins.txt/loadorder.txt into its
+ * profile folder (found live: the active profile's copies match the game's, an inactive
+ * one's match its state at the last switch away) — those are read for inactive profiles.
+ * plugins.txt never lists native plugins, which leaves them out on that side too.
+ */
+async function profilePluginStates(
+  api: IExtensionApi,
+  profile: IProfile,
+): Promise<PluginSide | undefined> {
+  const states: PluginSide["states"] = new Map();
+  if (profile.id === selectors.activeProfileId(state(api))) {
+    let loadOrder: LoadOrderEntry[];
+    try {
+      loadOrder = listLoadOrder(api);
+    } catch {
+      return undefined;
+    }
+    for (const entry of loadOrder.filter((e) => !e.isNative)) {
+      states.set(entry.plugin.toLowerCase(), { enabled: entry.enabled, index: entry.index });
+    }
+    return { states, source: "live" };
+  }
+  let plugins: string[];
+  let order: string[];
+  try {
+    plugins = fileLines(await readFile(path.join(profilePath(profile), "plugins.txt"), "utf8"));
+    order = fileLines(await readFile(path.join(profilePath(profile), "loadorder.txt"), "utf8"));
+  } catch {
+    return undefined;
+  }
+  const indexByName = new Map(order.map((name, index) => [name.toLowerCase(), index]));
+  for (const line of plugins) {
+    const enabled = line.startsWith("*");
+    const name = (enabled ? line.slice(1) : line).toLowerCase();
+    states.set(name, { enabled, index: indexByName.get(name) ?? -1 });
+  }
+  return { states, source: "profile files" };
+}
+
+// Indexes (into seq) of one longest strictly increasing subsequence — O(n log n).
+function longestIncreasing(seq: number[]): Set<number> {
+  const tails: number[] = [];
+  const prev: number[] = Array.from({ length: seq.length }, () => -1);
+  for (let i = 0; i < seq.length; i++) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (seq[tails[mid]] < seq[i]) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    prev[i] = lo > 0 ? tails[lo - 1] : -1;
+    tails[lo] = i;
+  }
+  const keep = new Set<number>();
+  for (let i = tails.length > 0 ? tails[tails.length - 1] : -1; i !== -1; i = prev[i]) {
+    keep.add(i);
+  }
+  return keep;
+}
+
+function pluginState(side: PluginSide, name: string): { enabled: boolean; index: number } {
+  return side.states.get(name) ?? { enabled: false, index: -1 };
+}
+
+function sortedNames(names: string[]): string[] {
+  return names.toSorted((x, y) => x.localeCompare(y));
+}
+
+function diffPlugins(a: PluginSide, b: PluginSide): PluginDiff {
+  const common = [...a.states.keys()].filter((name) => b.states.has(name));
+  const placed = common
+    .filter((name) => pluginState(a, name).index >= 0 && pluginState(b, name).index >= 0)
+    .toSorted((x, y) => pluginState(a, x).index - pluginState(a, y).index);
+  const inOrder = longestIncreasing(placed.map((name) => pluginState(b, name).index));
+  return {
+    sourceA: a.source,
+    sourceB: b.source,
+    onlyInA: sortedNames([...a.states.keys()].filter((name) => !b.states.has(name))),
+    onlyInB: sortedNames([...b.states.keys()].filter((name) => !a.states.has(name))),
+    enabledDiffers: sortedNames(
+      common.filter((name) => pluginState(a, name).enabled !== pluginState(b, name).enabled),
+    ).map((plugin) => ({
+      plugin,
+      enabledInA: pluginState(a, plugin).enabled,
+      enabledInB: pluginState(b, plugin).enabled,
+    })),
+    moved: placed
+      .filter((_, i) => !inOrder.has(i))
+      .map((plugin) => ({
+        plugin,
+        indexInA: pluginState(a, plugin).index,
+        indexInB: pluginState(b, plugin).index,
+      })),
+  };
+}
+
+/**
+ * What differs between two profiles of the same game: installed mods whose enabled state
+ * differs, and plugins that are only in one, enabled differently, or in a different load
+ * order. The read side of working with a test profile (clone, change, compare) — before,
+ * that meant dumping both profiles' modState (500K+ characters on a large modlist) and
+ * both plugin lists, then diffing by hand. profileB defaults to the active profile.
+ */
+export async function diffProfiles(
+  api: IExtensionApi,
+  profileIdA: string,
+  profileIdB?: string,
+): Promise<ProfileDiff> {
+  const st = state(api);
+  const profiles = selectors.profiles(st);
+  const idB = profileIdB ?? selectors.activeProfileId(st);
+  if (idB === undefined) {
+    throw new Error("No active profile and no profileB provided");
+  }
+  const a = profiles[profileIdA] as IProfile | undefined;
+  const b = profiles[idB] as IProfile | undefined;
+  if (a === undefined) {
+    throw new Error(`Unknown profile: ${profileIdA}`);
+  }
+  if (b === undefined) {
+    throw new Error(`Unknown profile: ${idB}`);
+  }
+  if (a.gameId !== b.gameId) {
+    throw new Error(
+      `Profiles are for different games (${a.gameId} vs ${b.gameId}) — nothing to compare.`,
+    );
+  }
+
+  const installed: { [id: string]: IMod } = st.persistent?.mods?.[a.gameId] ?? {};
+  const mods = Object.values(installed)
+    .map((mod) => ({
+      id: mod.id,
+      name: util.renderModName(mod),
+      enabledInA: isModEnabled(a, mod.id),
+      enabledInB: isModEnabled(b, mod.id),
+    }))
+    .filter((mod) => mod.enabledInA !== mod.enabledInB)
+    .toSorted((x, y) => x.name.localeCompare(y.name));
+
+  const pluginsA = await profilePluginStates(api, a);
+  const pluginsB = await profilePluginStates(api, b);
+  return {
+    a: { id: a.id, name: a.name },
+    b: { id: b.id, name: b.name },
+    mods,
+    plugins:
+      pluginsA === undefined || pluginsB === undefined ? null : diffPlugins(pluginsA, pluginsB),
+  };
+}
+
 export interface ListModsOptions {
   /** Only include mods currently enabled for the profile. Default false (all mods). */
   enabledOnly?: boolean;

@@ -25,6 +25,7 @@ const ACCESS_TIER = {
   scan_extension_actions: "read",
   vortex_query: "read",
   list_profiles: "read",
+  diff_profiles: "read",
   list_mods: "read",
   list_load_order: "read",
   get_plugin_details: "read",
