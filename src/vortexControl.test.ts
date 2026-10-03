@@ -447,6 +447,10 @@ describe("vortexControl: resolveGameId (via listMods)", () => {
   });
 });
 
+function installedMod(id: string, attributes: Record<string, unknown>) {
+  return { id, state: "installed", type: "", installationPath: "", attributes };
+}
+
 describe("vortexControl: mods", () => {
   it("listMods reads the active game's mods and marks enabled state from the active profile", () => {
     vi.mocked(selectors.activeGameId).mockReturnValue("skyrimse");
@@ -482,6 +486,54 @@ describe("vortexControl: mods", () => {
       { id: "modA", name: "modA", type: "", version: "1.0", enabled: true },
       { id: "modB", name: "modB", type: "", version: undefined, enabled: false },
     ]);
+  });
+
+  describe("Nexus source", () => {
+    function apiWithNexusMods() {
+      vi.mocked(selectors.activeGameId).mockReturnValue("skyrimse");
+      vi.mocked(selectors.activeProfile).mockReturnValue(undefined as never);
+      const api = fakeApi();
+      (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({
+        persistent: {
+          mods: {
+            skyrimse: {
+              fromNexus: installedMod("fromNexus", {
+                source: "nexus",
+                modId: 93235,
+                fileId: 652633,
+                homepage: "https://www.nexusmods.com/skyrimspecialedition/mods/93235/",
+              }),
+              bareNexus: installedMod("bareNexus", { source: "nexus", modId: 42 }),
+              // Found live: Vortex keeps a modId parsed from the archive name on a mod it
+              // marks "unsupported" — not a reliable Nexus link.
+              unsupported: installedMod("unsupported", { source: "unsupported", modId: 60817 }),
+              local: installedMod("local", { source: "user-generated" }),
+            },
+          },
+        },
+      });
+      return api;
+    }
+
+    it("adds nexus only for mods Vortex marks as installed from Nexus", () => {
+      const byId = new Map(listMods(apiWithNexusMods()).map((m) => [m.id, m]));
+
+      expect(byId.get("fromNexus")?.nexus).toEqual({
+        modId: 93235,
+        fileId: 652633,
+        url: "https://www.nexusmods.com/skyrimspecialedition/mods/93235/",
+      });
+      expect(byId.get("bareNexus")?.nexus).toEqual({ modId: 42 });
+      expect(byId.get("unsupported")).not.toHaveProperty("nexus");
+      expect(byId.get("local")).not.toHaveProperty("nexus");
+    });
+
+    it("filters by nexusModId", () => {
+      expect(
+        listMods(apiWithNexusMods(), undefined, { nexusModId: 93235 }).map((m) => m.id),
+      ).toEqual(["fromNexus"]);
+      expect(listMods(apiWithNexusMods(), undefined, { nexusModId: 60817 })).toEqual([]);
+    });
   });
 
   describe("includePlugins", () => {

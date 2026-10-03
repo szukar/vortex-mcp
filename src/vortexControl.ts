@@ -77,6 +77,32 @@ export interface ModSummary {
   enabled: boolean;
   /** Only with ListModsOptions.includePlugins — see ModPlugin. */
   plugins?: ModPlugin[];
+  /** Where the mod came from on Nexus Mods; left out for mods from anywhere else. */
+  nexus?: NexusSource;
+}
+
+export interface NexusSource {
+  modId: number;
+  fileId?: number;
+  /** The mod page, from the mod's own homepage attribute (its game domain isn't the gameId). */
+  url?: string;
+}
+
+// Only trusts mods Vortex itself marks as installed from Nexus (attributes.source).
+// Found live: a mod with source "unsupported" still carried a modId (parsed from its
+// archive name by Vortex), which isn't a reliable Nexus link.
+function nexusSource(mod: IMod): NexusSource | undefined {
+  const attributes = mod.attributes ?? {};
+  const modId = Number(attributes.modId);
+  if (attributes.source !== "nexus" || !Number.isInteger(modId) || modId <= 0) {
+    return undefined;
+  }
+  const fileId = Number(attributes.fileId);
+  return {
+    modId,
+    ...(Number.isInteger(fileId) && fileId > 0 ? { fileId } : {}),
+    ...(typeof attributes.homepage === "string" ? { url: attributes.homepage } : {}),
+  };
 }
 
 /**
@@ -1226,6 +1252,8 @@ export interface ListModsOptions {
    * order, the field is left out.
    */
   includePlugins?: boolean;
+  /** Only the mod(s) installed from this Nexus mod page id. */
+  nexusModId?: number;
 }
 
 // Groups the active game's deployed plugins by the mod that provides them, sorted by load
@@ -1275,15 +1303,22 @@ export function listMods(
       : undefined;
 
   const summaries = Object.values(mods)
-    .map((mod) => ({
-      id: mod.id,
-      name: util.renderModName(mod),
-      type: mod.type,
-      version: mod.attributes?.version as string | undefined,
-      enabled:
-        profile?.gameId === targetGameId ? (profile?.modState?.[mod.id]?.enabled ?? false) : false,
-      ...(plugins === undefined ? {} : { plugins: plugins.get(mod.id) ?? [] }),
-    }))
+    .map((mod): ModSummary => {
+      const nexus = nexusSource(mod);
+      return {
+        id: mod.id,
+        name: util.renderModName(mod),
+        type: mod.type,
+        version: mod.attributes?.version as string | undefined,
+        enabled:
+          profile?.gameId === targetGameId
+            ? (profile?.modState?.[mod.id]?.enabled ?? false)
+            : false,
+        ...(plugins === undefined ? {} : { plugins: plugins.get(mod.id) ?? [] }),
+        ...(nexus === undefined ? {} : { nexus }),
+      };
+    })
+    .filter((mod) => options.nexusModId === undefined || mod.nexus?.modId === options.nexusModId)
     .filter((mod) => !options.enabledOnly || mod.enabled)
     .filter(
       (mod) => nameFilterLower === undefined || mod.name.toLowerCase().includes(nameFilterLower),

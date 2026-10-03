@@ -278,7 +278,9 @@ function registerModInventoryTools(server: McpServer, api: IExtensionApi): void 
         "A large modlist (hundreds of mods) can exceed the client's response size limit; use " +
         "enabledOnly/nameFilter/limit to narrow the result rather than requesting everything. " +
         "includePlugins adds each mod's deployed plugins (name, enabled, load order index) " +
-        "for the active game — as of the last deploy, so deploy first after changing mods.",
+        "for the active game — as of the last deploy, so deploy first after changing mods. " +
+        "Mods installed from Nexus Mods carry `nexus` (modId, fileId, page url); " +
+        "nexusModId finds the mod for a Nexus page the user names.",
       inputSchema: z.object({
         gameId: z.string().optional().describe("Game id; defaults to the active game"),
         enabledOnly: z.boolean().optional().describe("Only include currently-enabled mods"),
@@ -293,11 +295,25 @@ function registerModInventoryTools(server: McpServer, api: IExtensionApi): void 
           .boolean()
           .optional()
           .describe("Add each mod's deployed plugins with load order state; default false"),
+        nexusModId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Only mods installed from this Nexus mod id (the number in its page URL)"),
       }),
     },
-    async ({ gameId, enabledOnly, nameFilter, limit, includePlugins }) => ({
+    async ({ gameId, enabledOnly, nameFilter, limit, includePlugins, nexusModId }) => ({
       content: [
-        jsonText(control.listMods(api, gameId, { enabledOnly, nameFilter, limit, includePlugins })),
+        jsonText(
+          control.listMods(api, gameId, {
+            enabledOnly,
+            nameFilter,
+            limit,
+            includePlugins,
+            nexusModId,
+          }),
+        ),
       ],
     }),
   );
