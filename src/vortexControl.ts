@@ -75,6 +75,21 @@ export interface ModSummary {
    * per-plugin equivalent, which can legitimately disagree with this field.
    */
   enabled: boolean;
+  /** Only with ListModsOptions.includePlugins — see ModPlugin. */
+  plugins?: ModPlugin[];
+}
+
+/**
+ * A plugin (esp/esm/esl) a mod has deployed to the game's Data folder, with its load
+ * order state. From session.plugins.pluginList, which Vortex builds from the deployed
+ * files — so it reflects the LAST DEPLOY: a mod disabled since still lists its plugins,
+ * and one enabled since lists none, until the next deploy.
+ */
+export interface ModPlugin {
+  name: string;
+  enabled: boolean;
+  /** Load order position (list_load_order's index); -1 if it has no load-order entry. */
+  index: number;
 }
 
 function state(api: IExtensionApi): types.IState {
@@ -1204,6 +1219,44 @@ export interface ListModsOptions {
   nameFilter?: string;
   /** Cap the number of results (applied after filtering). Default unlimited. */
   limit?: number;
+  /**
+   * Add each mod's deployed plugins (ModSummary.plugins). Default false — it grows a
+   * response that can already be large. Active game only: the plugin list is session
+   * state for the active game; for another game, or one without a plugin-based load
+   * order, the field is left out.
+   */
+  includePlugins?: boolean;
+}
+
+// Groups the active game's deployed plugins by the mod that provides them, sorted by load
+// order. Native plugins have no modId and are skipped. undefined when the game has no
+// plugin-based load order (listLoadOrder throws).
+function pluginsByMod(api: IExtensionApi): Map<string, ModPlugin[]> | undefined {
+  let loadOrder: LoadOrderEntry[];
+  try {
+    loadOrder = listLoadOrder(api);
+  } catch {
+    return undefined;
+  }
+  const byMod = new Map<string, ModPlugin[]>();
+  const byName = new Map(loadOrder.map((entry) => [entry.plugin.toLowerCase(), entry]));
+  const pluginList = (queryStatePath(api, ["session", "plugins", "pluginList"]) ?? {}) as Record<
+    string,
+    { modId?: string } | undefined
+  >;
+  for (const [name, plugin] of Object.entries(pluginList)) {
+    if (plugin?.modId === undefined) {
+      continue;
+    }
+    const entry = byName.get(name.toLowerCase());
+    const plugins = byMod.get(plugin.modId) ?? [];
+    plugins.push({ name, enabled: entry?.enabled ?? false, index: entry?.index ?? -1 });
+    byMod.set(plugin.modId, plugins);
+  }
+  for (const plugins of byMod.values()) {
+    plugins.sort((a, b) => a.index - b.index);
+  }
+  return byMod;
 }
 
 export function listMods(
@@ -1216,6 +1269,10 @@ export function listMods(
   const profile = selectors.activeProfile(st);
   const mods: { [id: string]: IMod } = st.persistent.mods[targetGameId] ?? {};
   const nameFilterLower = options.nameFilter?.toLowerCase();
+  const plugins =
+    options.includePlugins === true && targetGameId === selectors.activeGameId(st)
+      ? pluginsByMod(api)
+      : undefined;
 
   const summaries = Object.values(mods)
     .map((mod) => ({
@@ -1225,6 +1282,7 @@ export function listMods(
       version: mod.attributes?.version as string | undefined,
       enabled:
         profile?.gameId === targetGameId ? (profile?.modState?.[mod.id]?.enabled ?? false) : false,
+      ...(plugins === undefined ? {} : { plugins: plugins.get(mod.id) ?? [] }),
     }))
     .filter((mod) => !options.enabledOnly || mod.enabled)
     .filter(

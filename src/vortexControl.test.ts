@@ -484,6 +484,69 @@ describe("vortexControl: mods", () => {
     ]);
   });
 
+  describe("includePlugins", () => {
+    function apiWithPlugins(withLoadOrder = true) {
+      vi.mocked(selectors.activeGameId).mockReturnValue("skyrimse");
+      vi.mocked(selectors.activeProfile).mockReturnValue({
+        id: "p1",
+        name: "First",
+        gameId: "skyrimse",
+        modState: { modA: { enabled: true, enabledTime: 0 } },
+        lastActivated: 0,
+      });
+      const api = fakeApi();
+      (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({
+        persistent: {
+          mods: {
+            skyrimse: {
+              modA: { id: "modA", state: "installed", type: "", installationPath: "" },
+              modB: { id: "modB", state: "installed", type: "", installationPath: "" },
+            },
+          },
+        },
+        ...(withLoadOrder
+          ? {
+              loadOrder: {
+                "skyrim.esm": { loadOrder: 0 },
+                "a2.esp": { loadOrder: 2, enabled: false },
+                "a1.esp": { loadOrder: 1 },
+              },
+            }
+          : {}),
+        session: {
+          plugins: {
+            pluginList: {
+              "skyrim.esm": { isNative: true },
+              "a1.esp": { modId: "modA" },
+              "a2.esp": { modId: "modA" },
+            },
+          },
+        },
+      });
+      return api;
+    }
+
+    it("adds each mod's deployed plugins, sorted by load order, natives skipped", () => {
+      const result = listMods(apiWithPlugins(), undefined, { includePlugins: true });
+
+      expect(result.find((m) => m.id === "modA")?.plugins).toEqual([
+        { name: "a1.esp", enabled: true, index: 1 },
+        { name: "a2.esp", enabled: false, index: 2 },
+      ]);
+      expect(result.find((m) => m.id === "modB")?.plugins).toEqual([]);
+    });
+
+    it("leaves the field out unless asked, for another game, or without a load order", () => {
+      expect(listMods(apiWithPlugins())[0]).not.toHaveProperty("plugins");
+      expect(
+        listMods(apiWithPlugins(false), undefined, { includePlugins: true })[0],
+      ).not.toHaveProperty("plugins");
+      const api = apiWithPlugins();
+      vi.mocked(selectors.activeGameId).mockReturnValue("fallout4");
+      expect(listMods(api, "skyrimse", { includePlugins: true })[0]).not.toHaveProperty("plugins");
+    });
+  });
+
   it("listMods throws when there is no active game and none was provided", () => {
     vi.mocked(selectors.activeGameId).mockReturnValue("");
 

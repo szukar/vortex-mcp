@@ -276,7 +276,9 @@ function registerModInventoryTools(server: McpServer, api: IExtensionApi): void 
         "List mods for a game (defaults to the active game), with friendly names and enabled " +
         "state for the active profile — a formatted join vortex_query can't do in one call. " +
         "A large modlist (hundreds of mods) can exceed the client's response size limit; use " +
-        "enabledOnly/nameFilter/limit to narrow the result rather than requesting everything.",
+        "enabledOnly/nameFilter/limit to narrow the result rather than requesting everything. " +
+        "includePlugins adds each mod's deployed plugins (name, enabled, load order index) " +
+        "for the active game — as of the last deploy, so deploy first after changing mods.",
       inputSchema: z.object({
         gameId: z.string().optional().describe("Game id; defaults to the active game"),
         enabledOnly: z.boolean().optional().describe("Only include currently-enabled mods"),
@@ -287,10 +289,16 @@ function registerModInventoryTools(server: McpServer, api: IExtensionApi): void 
           .positive()
           .optional()
           .describe("Cap the number of results returned"),
+        includePlugins: z
+          .boolean()
+          .optional()
+          .describe("Add each mod's deployed plugins with load order state; default false"),
       }),
     },
-    async ({ gameId, enabledOnly, nameFilter, limit }) => ({
-      content: [jsonText(control.listMods(api, gameId, { enabledOnly, nameFilter, limit }))],
+    async ({ gameId, enabledOnly, nameFilter, limit, includePlugins }) => ({
+      content: [
+        jsonText(control.listMods(api, gameId, { enabledOnly, nameFilter, limit, includePlugins })),
+      ],
     }),
   );
 
