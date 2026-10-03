@@ -31,6 +31,7 @@ vi.mock("@nexusmods/vortex-api", () => ({
     ]),
     notifications: vi.fn<() => unknown[]>(),
     installPathForGame: vi.fn<(state: unknown, gameId: string) => string | undefined>(),
+    nextProfileId: vi.fn<() => string | undefined>(),
     currentGame: vi.fn(() => ({ id: "skyrimse", executable: "SkyrimSE.exe" })),
     currentGameDiscovery: vi.fn(() => ({ path: "C:/games/skyrim" })),
   },
@@ -212,51 +213,93 @@ describe("vortexControl: reflection", () => {
 });
 
 describe("vortexControl: profiles", () => {
-  it("switchProfile rejects unknown profile ids without dispatching", () => {
-    vi.mocked(selectors.profiles).mockReturnValue({});
-    const dispatch = vi.fn();
+  // A store whose dispatch plays out a profile switch: setNextProfile makes the target
+  // the next profile, and `finish` decides what Vortex does with it.
+  function fakeSwitchApi(finish: (target: string) => { active: string; next?: string }) {
+    let active = "p0";
+    let next: string | undefined;
+    vi.mocked(selectors.activeProfileId).mockImplementation(() => active);
+    vi.mocked(selectors.nextProfileId).mockImplementation(() => next);
+    vi.mocked(selectors.profiles).mockReturnValue({
+      p0: { id: "p0", name: "Zero", gameId: "skyrimse", modState: {}, lastActivated: 0 },
+      p1: { id: "p1", name: "First", gameId: "skyrimse", modState: {}, lastActivated: 0 },
+    });
+    const dispatch = vi.fn((action: unknown) => {
+      next = (action as { payload: string }).payload;
+      setTimeout(() => ({ active, next } = finish(next as string)), 50);
+    });
+    const api = fakeApi({ dispatch });
+    (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({
+      session: { base: { toolsRunning: {}, activity: { mods: [] } } },
+    });
+    return { api, dispatch };
+  }
 
-    expect(() => switchProfile(fakeApi({ dispatch }), "missing")).toThrow(/Unknown profile/);
+  it("switchProfile rejects unknown profile ids without dispatching", async () => {
+    const { api, dispatch } = fakeSwitchApi((target) => ({ active: target }));
+
+    await expect(switchProfile(api, "missing")).rejects.toThrow(/Unknown profile/);
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("switchProfile dispatches setNextProfile for a known profile", () => {
-    vi.mocked(selectors.profiles).mockReturnValue({
-      p1: { id: "p1", name: "First", gameId: "skyrimse", modState: {}, lastActivated: 0 },
-    });
-    const dispatch = vi.fn();
+  it("switchProfile dispatches setNextProfile and resolves once the profile is active", async () => {
+    // Regression test for the live finding: the old version returned on dispatch while the
+    // old profile stayed active ~10s more during the switch's purge + deploy.
+    const { api, dispatch } = fakeSwitchApi((target) => ({ active: target, next: target }));
 
-    switchProfile(fakeApi({ dispatch }), "p1");
+    const result = await switchProfile(api, "p1");
 
     expect(actions.setNextProfile).toHaveBeenCalledWith("p1");
     expect(dispatch).toHaveBeenCalled();
+    expect(result).toEqual({ profileId: "p1", switchMs: expect.any(Number) });
+    expect(selectors.activeProfileId(undefined as never)).toBe("p1");
   });
 
-  it("switchProfile throws instead of dispatching when expectedActiveProfileId no longer matches", () => {
+  it("switchProfile returns right away for the profile that is already active", async () => {
+    const { api, dispatch } = fakeSwitchApi((target) => ({ active: target }));
+
+    expect(await switchProfile(api, "p0")).toEqual({ profileId: "p0", switchMs: 0 });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("switchProfile fails right away when Vortex cancels the switch", async () => {
+    // Vortex's cancelSwitch clears nextProfileId and leaves the old profile active.
+    const { api } = fakeSwitchApi(() => ({ active: "p0", next: undefined }));
+
+    await expect(switchProfile(api, "p1")).rejects.toThrow(
+      /Vortex canceled the switch to profile p1/,
+    );
+  });
+
+  it("switchProfile refuses while the game runs, without dispatching", async () => {
+    const { api, dispatch } = fakeSwitchApi((target) => ({ active: target }));
+    (api as unknown as { store: { getState: () => unknown } }).store.getState = () => ({
+      session: { base: { toolsRunning: { "skyrimse.exe": {} }, activity: { mods: [] } } },
+    });
+
+    await expect(switchProfile(api, "p1")).rejects.toThrow(
+      /Can't switch profiles while the game or a tool is running: skyrimse\.exe\. Vortex would skip the deploy that comes with the switch/,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("switchProfile throws instead of dispatching when expectedActiveProfileId no longer matches", async () => {
     // Regression test for a real cold-run incident: the active profile silently reverted
     // mid-analysis (Vortex's own UI, another agent, anything) with zero signal from any
     // read tool. A caller that captured the active profile earlier can assert it's still
     // true right before a write instead of silently acting on a stale assumption.
-    vi.mocked(selectors.profiles).mockReturnValue({
-      p1: { id: "p1", name: "First", gameId: "skyrimse", modState: {}, lastActivated: 0 },
-    });
-    vi.mocked(selectors.activeProfileId).mockReturnValue("someOtherProfile");
-    const dispatch = vi.fn();
+    const { api, dispatch } = fakeSwitchApi((target) => ({ active: target }));
 
-    expect(() =>
-      switchProfile(fakeApi({ dispatch }), "p1", { activeProfileId: "expectedProfile" }),
-    ).toThrow(/Active profile changed/);
+    await expect(switchProfile(api, "p1", { activeProfileId: "expectedProfile" })).rejects.toThrow(
+      /Active profile changed/,
+    );
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("switchProfile proceeds when expectedActiveProfileId matches", () => {
-    vi.mocked(selectors.profiles).mockReturnValue({
-      p1: { id: "p1", name: "First", gameId: "skyrimse", modState: {}, lastActivated: 0 },
-    });
-    vi.mocked(selectors.activeProfileId).mockReturnValue("currentProfile");
-    const dispatch = vi.fn();
+  it("switchProfile proceeds when expectedActiveProfileId matches", async () => {
+    const { api, dispatch } = fakeSwitchApi((target) => ({ active: target, next: target }));
 
-    switchProfile(fakeApi({ dispatch }), "p1", { activeProfileId: "currentProfile" });
+    await switchProfile(api, "p1", { activeProfileId: "p0" });
 
     expect(dispatch).toHaveBeenCalled();
   });

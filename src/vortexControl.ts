@@ -1051,17 +1051,62 @@ export async function dispatchAction(
   );
 }
 
-export function switchProfile(
+export interface SwitchProfileResult {
+  profileId: string;
+  /** Wall time until the profile was active and its deploy done; 0 if it already was active. */
+  switchMs: number;
+}
+
+/**
+ * Switches the active profile via setNextProfile — the same path as Vortex's own profile
+ * list — and waits until the switch is really done. Found live: the switch is a purge of
+ * the old profile plus a deploy of the new one, and returning on dispatch (as this used to)
+ * left the OLD profile active for ~10s more on a 125-mod Skyrim SE setup; anything the
+ * caller did in that window acted on the wrong profile. Done means: the target is the
+ * active profile and no mod operation is running. Vortex clears nextProfileId
+ * (settings.profiles) when it cancels a switch (profile_management's cancelSwitch), which ends
+ * the wait early with an error instead of running into the timeout.
+ *
+ * Shares deploy_mods' up-front checks (assertModOperationPossible): the switch deploys
+ * through the same deploy-mods event, so with the game running that deploy would be
+ * skipped silently, or hang on files the game holds open.
+ */
+export async function switchProfile(
   api: IExtensionApi,
   profileId: string,
   expectedContext?: ExpectedContext,
-): void {
+  timeoutMs = MOD_OPERATION_TIMEOUT_MS,
+): Promise<SwitchProfileResult> {
   assertExpectedContext(api, expectedContext);
-  const st = state(api);
-  if (selectors.profiles(st)[profileId] === undefined) {
+  if (selectors.profiles(state(api))[profileId] === undefined) {
     throw new Error(`Unknown profile: ${profileId}`);
   }
+  if (selectors.activeProfileId(state(api)) === profileId) {
+    return { profileId, switchMs: 0 };
+  }
+  await assertModOperationPossible(api, "switch", undefined);
+
+  const started = Date.now();
   store(api).dispatch(actions.setNextProfile(profileId));
+  const isActive = () => selectors.activeProfileId(state(api)) === profileId;
+  const settled = () => isActive() && (sessionBase(api).activity?.mods ?? []).length === 0;
+  const canceled = () => !isActive() && selectors.nextProfileId(state(api)) !== profileId;
+  const finished = await waitFor(() => settled() || canceled(), timeoutMs);
+  if (finished && !settled()) {
+    throw new Error(
+      `Vortex canceled the switch to profile ${profileId} — check list_notifications for ` +
+        "the reason. The previous profile is still active.",
+    );
+  }
+  if (!finished) {
+    throw new Error(
+      `The profile switch didn't finish within ${timeoutMs}ms — Vortex is most likely ` +
+        "waiting for the user in a dialog (check list_dialogs and list_external_changes). " +
+        "The switch is still pending in Vortex, not canceled; list_profiles shows which " +
+        "profile is active.",
+    );
+  }
+  return { profileId, switchMs: Date.now() - started };
 }
 
 export interface ProfileSummary {
@@ -1564,32 +1609,41 @@ async function findRunningGameProcess(api: IExtensionApi): Promise<string | unde
   }
 }
 
+type ModOperation = "deploy" | "purge" | "switch";
+
+// How each operation is named in the guard's messages. A profile switch deploys the new
+// profile through the same deploy-mods event (profile_management's onActivate), so it's
+// that deploy Vortex would skip.
+const MOD_OPERATION_TEXT: Record<ModOperation, { verb: string; skipped: string }> = {
+  deploy: { verb: "deploy", skipped: "the deploy" },
+  purge: { verb: "purge", skipped: "the purge" },
+  switch: { verb: "switch profiles", skipped: "the deploy that comes with the switch" },
+};
+
 /**
- * The checks deploy_mods and purge_mods share, run before anything is emitted. Found live
+ * The checks deploy_mods, purge_mods and switch_profile share, run before anything is
+ * emitted or dispatched. Found live
  * in Vortex 2.7.0 (updateModDeployment / purgeMods): while the game or any tool started
  * from Vortex is running (session.base.toolsRunning), both only show a "Can't deploy/purge
  * while the game or a tool is running" toast and call back WITHOUT an error — a skipped
  * operation is indistinguishable from a real one. Another mod operation already in
- * progress is refused too. Returns the active profile id the operation will act on.
+ * progress is refused too.
  *
  * toolsRunning alone isn't enough, see findRunningGameProcess — the game is also looked
  * up in the OS process list.
  */
 async function assertModOperationPossible(
   api: IExtensionApi,
-  verb: "deploy" | "purge",
+  operation: ModOperation,
   expectedContext: ExpectedContext | undefined,
-): Promise<string> {
+): Promise<void> {
+  const { verb, skipped } = MOD_OPERATION_TEXT[operation];
   assertExpectedContext(api, expectedContext);
-  const profileId = selectors.activeProfileId(state(api));
-  if (!profileId) {
-    throw new Error(`No active profile to ${verb}`);
-  }
   const tracked = Object.keys(sessionBase(api).toolsRunning ?? {});
   if (tracked.length > 0) {
     throw new Error(
       `Can't ${verb} while the game or a tool is running: ${tracked.join(", ")}. Vortex ` +
-        `would skip the ${verb} without reporting an error. Close it and retry.`,
+        `would skip ${skipped} without reporting an error. Close it and retry.`,
     );
   }
   const gameProcess = await findRunningGameProcess(api);
@@ -1606,6 +1660,13 @@ async function assertModOperationPossible(
       `Vortex is busy with another mod operation (${busy.join(", ")}). Retry once it ` +
         "finishes.",
     );
+  }
+}
+
+function requireActiveProfile(api: IExtensionApi, verb: string): string {
+  const profileId = selectors.activeProfileId(state(api));
+  if (!profileId) {
+    throw new Error(`No active profile to ${verb}`);
   }
   return profileId;
 }
@@ -1659,7 +1720,8 @@ export async function deployMods(
   expectedContext?: ExpectedContext,
   timeoutMs = MOD_OPERATION_TIMEOUT_MS,
 ): Promise<DeployResult> {
-  const profileId = await assertModOperationPossible(api, "deploy", expectedContext);
+  await assertModOperationPossible(api, "deploy", expectedContext);
+  const profileId = requireActiveProfile(api, "deploy");
 
   // The sort itself was found live to take ~20ms, far shorter than any poll interval, so
   // it's caught with a store subscription (set up before the deploy starts) instead.
@@ -1698,7 +1760,8 @@ export async function purgeMods(
   timeoutMs = MOD_OPERATION_TIMEOUT_MS,
   allowFallback = false,
 ): Promise<PurgeResult> {
-  const profileId = await assertModOperationPossible(api, "purge", expectedContext);
+  await assertModOperationPossible(api, "purge", expectedContext);
+  const profileId = requireActiveProfile(api, "purge");
   const purgeMs = await emitModOperation(api, "purge", "purge-mods", [allowFallback], timeoutMs);
   return { profileId, purgeMs };
 }

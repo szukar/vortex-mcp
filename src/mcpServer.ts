@@ -816,25 +816,43 @@ function registerWriteTools(server: McpServer, api: IExtensionApi): void {
     "switch_profile",
     {
       description:
-        "Switch Vortex to a different profile by id (query list_profiles to find one). NOT " +
-        "instant or lightweight: read from Vortex's own profile_management source, this " +
-        "purges the current profile's deployed files then deploys the new profile's mods — " +
-        "real, potentially slow filesystem work, the same as switching profiles in the " +
-        "Vortex UI. This tool call returns as soon as the switch is DISPATCHED, not once " +
-        "deployment finishes — poll needToDeployForGame or watch for a 'deploying' " +
-        "notification (list_notifications) if you need to know when it's actually done. " +
-        "Switching to an unknown profileId throws. Pass expectedActiveProfileId to guard " +
-        "against acting on a stale assumption about what's currently active — see its own " +
-        "param description.",
+        "Switch Vortex to a different profile by id (query list_profiles to find one) and " +
+        "wait until the switch is really done. NOT instant or lightweight: Vortex purges " +
+        "the current profile's deployed files and deploys the new profile's mods — real, " +
+        "potentially slow filesystem work, the same as switching profiles in the Vortex " +
+        "UI. Until it's done the OLD profile stays active, so this returns only once the " +
+        "new profile is active and no mod operation is running. Same up-front checks as " +
+        "deploy_mods (fails when the game — also one started outside Vortex — or a tool " +
+        "is running, or another mod operation is in progress). If Vortex stops to ask the " +
+        "user something, times out with a pointer to list_dialogs / " +
+        "list_external_changes; if Vortex cancels the switch, fails right away. Switching " +
+        "to an unknown profileId throws; to the already active one returns switchMs 0. " +
+        "Pass expectedActiveProfileId to guard against acting on a stale assumption about " +
+        "what's currently active — see its own param description.",
       inputSchema: z.object({
         profileId: z.string().describe("Target profile id (query list_profiles to find one)"),
+        timeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(3600)
+          .optional()
+          .describe("How long to wait for the switch; default 120"),
         expectedActiveProfileId: expectedContextSchema.expectedActiveProfileId,
       }),
     },
-    async ({ profileId, expectedActiveProfileId }) => {
-      control.switchProfile(api, profileId, { activeProfileId: expectedActiveProfileId });
-      return { content: [{ type: "text", text: `Switched to profile ${profileId}` }] };
-    },
+    async ({ profileId, timeoutSeconds, expectedActiveProfileId }) => ({
+      content: [
+        jsonText(
+          await control.switchProfile(
+            api,
+            profileId,
+            { activeProfileId: expectedActiveProfileId },
+            timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000,
+          ),
+        ),
+      ],
+    }),
   );
 
   server.registerTool(

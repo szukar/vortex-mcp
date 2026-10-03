@@ -18,7 +18,7 @@ vi.mock("./vortexControl", () => ({
   querySelector: vi.fn(() => undefined),
   scanExtensionActions: vi.fn(async () => []),
   queryStatePath: vi.fn(() => undefined),
-  switchProfile: vi.fn(),
+  switchProfile: vi.fn(async () => ({ profileId: "p1", switchMs: 1 })),
   cloneProfile: vi.fn(async () => ({
     id: "new-id",
     name: "clone",
